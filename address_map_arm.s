@@ -22,6 +22,9 @@
  *        initialization code to avoid hardcoding hexadecimal addresses.
  *      - These values are derived from the Cyclone V HPS/FPGA memory map provided in 
  *        the DE1-SoC Reference Manual and ARM Cortex-A9 Technical Reference Manual.
+ *      - To have AI generate a Title Block, you may use a prompt similar to "Create a 
+ *        detailed title block for the following code:" and then paste the code into the
+ *        prompt. Alternatively, you may add the code file to AI tool.
  *
  *  Author         : R. Moore
  *  Date Created   : 2025-08-12
