@@ -1,0 +1,121 @@
+/*==============================================================================
+  File:      start.S
+  Target:    Raspberry Pi Zero / Zero W (BCM2835, ARM1176JZF-S, AArch32)
+  Purpose:   Minimal bare-metal reset/entry code:
+               - enter in Supervisor (SVC) mode with IRQ/FIQ masked
+               - set up a temporary stack
+               - zero the .bss section
+               - call C entry point `main`
+               - park in an infinite loop on return
+
+  Boot model:
+    • The GPU firmware loads a flat binary (kernel.img by default) and jumps
+      into it in ARM state. The common link/entry address used by Pi 0/1 is
+      0x8000; this file doesn’t rely on that location directly but assumes
+      RAM is available and that .bss/.data symbols are properly linked.
+
+  Toolchain expectations:
+    • Assembler: arm-none-eabi-as (ARMv6)
+    • C/C++:     arm-none-eabi-gcc with -ffreestanding -nostdlib
+    • Linker:    arm-none-eabi-ld using a linker script that defines:
+         - ENTRY(_start)
+         - Symbols: __bss_start, __bss_end (word-aligned)
+         - Places .text before .bss (typical)
+    • ABI: AAPCS: on BL to C, r0–r3 are caller-saved, stack 8-byte aligned
+      at public C call boundaries (we keep it simple here).
+
+  Memory / mode assumptions:
+    • MMU, caches, and FPU are left in their reset states (off for MMU).
+    • We don’t install a vector table here; exceptions are masked.
+    • Stack is placed at 0x0010_0000 (1 MiB) as a scratch location well
+      above a tiny binary (fine for “hello world”). Adjust for your layout.
+
+  Notes on sections & literals:
+    • .text.boot is a conventional early-boot subsection; the linker script
+      should pull it first so _start is at the image entry.
+    • .ltorg ensures PC-relative literal pools (e.g., from `ldr rX, =imm`)
+      are emitted close enough for ARMv6 reachability.
+
+  Safety / next steps:
+    • For real projects, move the stack to a reserved RAM region, set up
+      proper exception vectors, initialize .data from ROM to RAM, and
+      establish a system clock/uart before calling into C.
+
+  Author:    Chat GPT
+  License:   MIT
+  Date:      2025/08/27
+==============================================================================*/
+
+    .section .text.boot         // Ensure this lands at the very start of .text
+    .globl  _start
+_start:
+    // ---- Establish a known, quiet CPU state --------------------------------
+    // cpsid if
+    //   • CPS (Change Processor State) instruction in ARM state.
+    //   • 'i' = mask IRQ, 'f' = mask FIQ.
+    //   • We do this immediately to prevent any asynchronous exceptions
+    //     while memory and stack are not yet initialized.
+    cpsid   if
+
+    // ---- Create a temporary stack ------------------------------------------
+    // ldr r0, =0x100000
+    //   • Use an assembler literal to put the immediate 0x0010_0000 (1 MiB)
+    //     into r0. The 'ldr =imm' pseudo-op generates a PC-relative literal
+    //     load; the literal value itself will be placed nearby (see .ltorg).
+    // mov sp, r0
+    //   • Set the stack pointer for SVC mode. This gives C code a safe stack.
+    //   • For multi-mode setups you’d also set banked SP for IRQ/FIQ modes.
+    ldr     r0, =0x100000       // Scratch stack top at 1 MiB (adjust as needed)
+    mov     sp, r0
+
+    // ---- Zero-initialize the .bss section ----------------------------------
+    // C expects statics and globals with no explicit initializer to be zero.
+    // The linker script must provide __bss_start/__bss_end symbols, with
+    // __bss_start <= __bss_end and word alignment.
+    //
+    // r1 = current pointer; r2 = end pointer; r3 = 0 to store
+    ldr     r1, =__bss_start
+    ldr     r2, =__bss_end
+
+1:  // Loop: while (r1 < r2) *r1 = 0, r1 += 4... Note the really bad label names....
+    // cmp r1, r2  /  bhs 2f
+    //   • Compare pointers; if r1 >= r2, we’re done (branch to label 2).
+    cmp     r1, r2
+    bhs     2f
+
+    // mov r3, #0
+    //   • Load zero into r3 once per iteration (tiny and clear).
+    //     (Could also hoist outside loop; kept here for readability.)
+    mov     r3, #0
+
+    // str r3, [r1], #4
+    //   • Store 0 to *r1, then post-increment r1 by 4 bytes (word step).
+    str     r3, [r1], #4
+
+    // b 1b
+    //   • Unconditional branch back to label '1' (the 'b' suffix means
+    //     “backward” here in comments only; the assembler uses the numeric label).
+    b       1b
+
+2:
+    // ---- Call the C entry point --------------------------------------------
+    // bl main
+    //   • Branch with link to the C function 'main'.
+    //   • AAPCS: r0–r3 are argument registers; we pass none, so they are
+    //     don’t-care. The stack is valid, so C can create frames.
+    bl      main
+
+    // ---- If main ever returns, park the core --------------------------------
+hang:
+    // b hang
+    //   • Simple infinite loop. For lower power you could use 'wfi'/'wfe'
+    //     but those require enabling/considering interrupts/events.
+    b       hang
+
+    // ---- Literal pool anchor ------------------------------------------------
+    // .ltorg
+    //   • Force emission of a literal pool here so that any 'ldr rX, =imm'
+    //     pseudo-ops above can reach their constants within ARMv6 range.
+    //   • Without .ltorg (or a close-enough pool), the assembler might place
+    //     literals too far away if this file grows, causing relocation errors.
+    .ltorg
